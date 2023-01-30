@@ -1,0 +1,7 @@
+# Distribution files
+dist/
+*.egg-info/
+
+# Python cached files
+*.pyc
+__pycache__/

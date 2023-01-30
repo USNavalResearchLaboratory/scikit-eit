@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "scikit-eit"
+version = "0.0.1"
+authors = [
+  { name="George Gatling", email="george.gatling@nrl.navy.mil" },
+]
+description = "A Python package for electrical impedance tomography."
+readme = "README.md"
+requires-python = ">=3.7"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    # "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/USNavalResearchLaboratory/scikit-eit"
+"Bug Tracker" = "https://github.com/USNavalResearchLaboratory/scikit-eit/issues"
