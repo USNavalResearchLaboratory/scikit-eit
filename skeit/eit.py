@@ -39,19 +39,35 @@ class EIT:
         self.p0 = self.basis.with_element(skfem.ElementTriP0())
         self.e_basis = [skfem.FacetBasis(self.mesh, element(), facets=f) for f in electrodes]
         self.L = len(self.e_basis)
+        pix_id = [int(p[1:]) for p in self.subdomains.keys() if p.startswith("s")]
+        asort = np.argsort(pix_id)
+        pix_s = [p for p in self.subdomains.keys() if p.startswith("s")]
+        self.pix = [self.p0.get_dofs(elements=pix_s[a]) for a in asort]
+        self.N = len(self.pix)
         self.P = np.zeros([self.L, self.L-1])
         self.P[0] = 1
         i = np.arange(self.L-1)
         self.P[i+1, i] = -1
 
 
-    def jacobian(self, sigma0, zl):
+    def jacobian_old(self, sigma0, zl):
         u, U0 = self.measure(sigma0, zl)
         g = [self.basis.interpolate(uu).grad for uu in u]
         J = np.empty([U0.shape[0], sigma0.shape[0]])
         for i in range(self.L):
             for j in range(self.L):
                 J[i * self.L + j] = (-1 * dot(g[i], g[j]) * self.basis.dx).sum(-1)
+        return U0, J
+
+
+    def jacobian(self, sigma0, zl):
+        u, U0 = self.measure(sigma0, zl)
+        g = [self.basis.interpolate(uu).grad for uu in u]
+        J = np.empty([U0.shape[0], self.N])
+        for i in range(self.L):
+            for j in range(self.L):
+                a = (-1 * dot(g[i], g[j]) * self.basis.dx).sum(-1)
+                J[i * self.L + j] = np.array([a[p].sum() for p in self.pix])
         return U0, J
     
     
