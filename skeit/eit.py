@@ -49,6 +49,14 @@ class EIT:
         i = np.arange(self.L-1)
         self.P[i+1, i] = -1
 
+    def make_s(self, data):
+        s = np.empty(self.p0.N)
+        for p, v in zip(self.pix, data):
+            s[p] = v
+        return s
+
+    def s_plot(self, data, **kwargs):
+        self.p0.plot(self.make_s(data), **kwargs)
 
     def jacobian_old(self, sigma0, zl):
         u, U0 = self.measure(sigma0, zl)

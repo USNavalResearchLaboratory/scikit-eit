@@ -4,6 +4,7 @@ import numpy as np
 from pathlib import Path
 from scipy.spatial import Voronoi
 import skfem.io
+from tqdm.notebook import tqdm
 
 # make gmsh more readable
 _1D = 1
@@ -22,8 +23,9 @@ def build_polygonal_mesh(N, LN, alpha, beta, h1, h2, outdir):
     cn = 2*np.pi*r / dr
     a = [np.linspace(0, 2*np.pi, int(n), endpoint=False) for n in cn]
     pixels = np.vstack([rr * np.vstack([np.cos(aa), np.sin(aa)]).T for rr, aa in zip(r, a)] + [[0,0]])
-    for _ in range(50):
-        verts, regions, b = _partition(N, pixels, a=.01)
+    # for _ in tqdm(range(50)):
+    for r in range(1):
+        verts, regions, b = _partition(N, pixels, a=1e-4)
         pixels = np.array([verts[r].mean(axis=0) for r in regions[1:]])
     pts = list()
     for r in regions[1:]:
