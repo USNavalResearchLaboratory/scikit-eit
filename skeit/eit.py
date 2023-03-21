@@ -50,7 +50,7 @@ class EIT:
         self.P[i+1, i] = -1
 
     def make_s(self, data):
-        s = np.empty(self.p0.N)
+        s = np.empty(self.p0.N, dtype=data.dtype)
         for p, v in zip(self.pix, data):
             s[p] = v
         return s

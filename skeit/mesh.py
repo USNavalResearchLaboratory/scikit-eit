@@ -11,53 +11,42 @@ _1D = 1
 _2D = 2
 
 
-#######################################################################################
-def build_polygonal_mesh(N, LN, alpha, beta, h1, h2, outdir):
-    """Build a regular polygonal mesh in gmsh format."""
-    name = f"N{N:02d}_LN{LN:02d}_A{int(alpha*100):03d}_B{int(alpha*100):03d}_H{int(h1*1000):04d}_H{int(h2*1000):04d}"
-    mesh_file = Path(outdir)/f"{name}.msh"
-    mesh_file.parent.mkdir(parents=True, exist_ok=True)
+def _get_voronoi(N, beta, h1):
+    r0 = 1/np.sqrt(N*np.cos(np.pi/N)*np.sin(np.pi/N))
+    r1 = r0*np.cos(np.pi/N)
+    radii =  np.linspace(beta*r1, 0, int(beta*r1/h1), endpoint=False)
+    na = [int(2*np.pi*r/h1) for r in radii]
+    da = [2*np.pi/na0 for na0 in na]
+    a = [da0*np.arange(na0) for na0, da0 in zip(na, da)]
+    x = np.hstack([r*np.cos(a0) for a0,r in zip(a,radii)] + [0])
+    y = np.hstack([r*np.sin(a0) for a0,r in zip(a,radii)] + [0])
+    return Voronoi(np.vstack([x,y]).T)
 
-    r = np.linspace(beta*np.cos(np.pi/N), 0, int(beta*np.cos(np.pi/N)/h2), endpoint=False)
-    dr = r[0]-r[1]
-    cn = 2*np.pi*r / dr
-    a = [np.linspace(0, 2*np.pi, int(n), endpoint=False) for n in cn]
-    pixels = np.vstack([rr * np.vstack([np.cos(aa), np.sin(aa)]).T for rr, aa in zip(r, a)] + [[0,0]])
-    # for _ in tqdm(range(50)):
-    for r in range(1):
-        verts, regions, b = _partition(N, pixels, a=1e-4)
-        pixels = np.array([verts[r].mean(axis=0) for r in regions[1:]])
-    pts = list()
-    for r in regions[1:]:
-        if not any([p in b for p in r]):
-            continue
-        pts += [p for p in r if p not in b]
-    pts = np.unique(pts)
-    pts_verts = verts[pts]
-    asort = np.argsort([np.arctan2(x, y) for x, y in verts[pts]])
-    inner_pts = pts[asort].tolist()
-    inner_pts += [inner_pts[0]]
+def build_polygon_mesh(N, LN, alpha, beta, h1, h2, outdir):
+    name = f"N{N:02d}_LN{LN:02d}_A{int(alpha*100):03d}_B{int(beta*100):03d}_H{int(h1*1000):04d}_H{int(h2*1000):04d}"
+    mesh_file = Path(outdir)/f"poly_{name}.msh"    
 
-    L = LN * N
-    electrodes = [f"e{i}" for i in range(L)]
+    r0 = 1/np.sqrt(N*np.cos(np.pi/N)*np.sin(np.pi/N))
+    angles = np.linspace(0, 2*np.pi, N, endpoint=False) - np.pi/N - np.pi/2
+    outer_pts = r0*np.array([[np.cos(a), np.sin(a)] for a in angles])
+    electrodes = [f"e{i}" for i in range(LN*N)]
+    vor = _get_voronoi(N, beta, h1)
+
     gmsh.initialize()
     try:
         gmsh.option.setNumber("General.Verbosity", 3)
 
-        # Compute the points on the boundary
-        angles = np.linspace(0,2*np.pi,N,endpoint=False) - np.pi/N - np.pi/2
-        corner_pts = np.array([[np.cos(a), np.sin(a)] for a in angles])
         boundaryt_pts = list()
         for i in range(N):
             j = (i+1)%N
-            dp = corner_pts[j] - corner_pts[i]
+            dp = outer_pts[j] - outer_pts[i]
             p_hat = dp/np.linalg.norm(dp)
             n_gaps = LN + 1
             gap_size = (1-alpha)*np.linalg.norm(dp)/n_gaps
             electrode_size = alpha*np.linalg.norm(dp)/LN
-            boundaryt_pts += [corner_pts[i]]
+            boundaryt_pts += [outer_pts[i]]
             for k in range(1,n_gaps):
-                p = corner_pts[i] + p_hat*k*(gap_size+electrode_size)
+                p = outer_pts[i] + p_hat*k*(gap_size+electrode_size)
                 boundaryt_pts += [p - p_hat*electrode_size, p]
         boundaryt_pts = np.array(boundaryt_pts)    
         boundary_pt_ids = [gmsh.model.geo.add_point(*p, 0) for p in boundaryt_pts]
@@ -65,64 +54,93 @@ def build_polygonal_mesh(N, LN, alpha, beta, h1, h2, outdir):
         # Add boundary lines
         boundary_lines = list()
         electrode_lines = list()
-        electrode_pt_ids = list()
         k = 0
         for i in range(N*(LN*2+1)):
             j = (i+1)%len(boundaryt_pts)
             line = gmsh.model.geo.add_line(boundary_pt_ids[i], boundary_pt_ids[j])
             boundary_lines += [line]
             if k % 2 == 1:
-                electrode_pt_ids += [boundary_pt_ids[i], boundary_pt_ids[j]]
                 electrode_lines += [line]
             k = (k + 1) % (LN*2+1)
-
-        # Add the pixels
-        nid = 1
-        pmap = dict()
+            
+        # Add inner points
+        pmap = {
+            i:gmsh.model.geo.add_point(*p, 0)
+            for i, p in enumerate(vor.vertices)
+        }
+        
+        # inner facets
         lmap = dict()
-        for i, v in enumerate(verts):
-            if i in b:
-                continue
-            pmap[i] = gmsh.model.geo.add_point(v[0], v[1], 0)
-        for j,r in enumerate(regions[1:]):
-            if any([p in b for p in r]):
-                continue
-            for i in range(len(r)):
-                if (r[i], r[(i+1)%len(r)]) not in lmap:
-                    lmap[(r[i], r[(i+1)%len(r)])] = gmsh.model.geo.add_line(pmap[r[i]], pmap[r[(i+1)%len(r)]])
-                    lmap[(r[(i+1)%len(r)], r[i])] = -lmap[(r[i], r[(i+1)%len(r)])]
-            curve = [ lmap[(r[i], r[(i+1)%len(r)])] for i in range(len(r)) ]
-            px_loop = gmsh.model.geo.add_curve_loop(curve)
-            px = gmsh.model.geo.add_plane_surface([px_loop])
-            gmsh.model.add_physical_group(_2D, [px])
+        for rv in vor.ridge_vertices:
+            if rv[0] >=0:
+                key = (rv[0], rv[1])
+                ikey = (rv[1], rv[0])
+                if key not in lmap and ikey not in lmap:
+                    lmap[key] = gmsh.model.geo.add_line(pmap[rv[0]], pmap[rv[1]])
+                    lmap[ikey] = -lmap[key]
 
-            gmsh.model.set_physical_name(
-                _2D, gmsh.model.add_physical_group(_2D, [px]), f"s{nid}")
-            nid += 1
-
+        # inner border
+        points = list()    
+        lines = list()
+        x = np.unique(vor.ridge_points[(np.array(vor.ridge_vertices)[:,0] < 0)])
+        for i, rp in enumerate(vor.ridge_points):
+            if (vor.ridge_vertices[i][0] >= 0) and (rp[0] in x or rp[1] in x):
+                points.append(vor.ridge_vertices[i])
+        points = np.unique(points)
+        asort = np.argsort(np.arctan2(vor.vertices[points][:,0], vor.vertices[points][:,1]))
+        points = points[asort]
+        for i in range(len(points)):
+            j = (i+1)%len(points)
+            key = (points[i], points[j])
+            lines.append(lmap[key])
+        inner_loop = gmsh.model.geo.add_curve_loop(lines)
+        outer_loop = gmsh.model.geo.add_curve_loop(boundary_lines)
+        center = gmsh.model.geo.add_plane_surface([inner_loop])
+        edge =  gmsh.model.geo.add_plane_surface([inner_loop, outer_loop])
         gmsh.model.geo.synchronize()
-        inner = [lmap[(inner_pts[a],inner_pts[a+1])] for a in range(len(inner_pts)-1)]
-        domain_boundary = gmsh.model.geo.add_curve_loop(boundary_lines+inner)
-        domain = gmsh.model.geo.add_plane_surface([domain_boundary])
         gmsh.model.set_physical_name(
-            _2D, gmsh.model.add_physical_group(_2D, [domain]), f"s0")
+            _2D, gmsh.model.add_physical_group(_2D, [edge]), f"s0")
+        
+        # inner elements
+        rv = np.array(vor.ridge_vertices)
+        rp = np.array(vor.ridge_points)
+        p = np.unique(rp[rv[:,0]<0])
+        q = [pp for pp in np.unique(rp) if pp not in p]
+
+        cells = list()
+        for k, q0 in enumerate(q):
+            lines = list()
+            r = [i for i, r in enumerate(rp) if r[0]==q0 or r[1]==q0]
+            verts = np.unique(rv[r])
+            vert_pts = vor.vertices[verts]
+            asort = np.argsort(np.arctan2(vert_pts[:,0]-vor.points[q0][0], vert_pts[:,1]-vor.points[q0][1]))
+            verts = verts[asort]
+            for i in range(len(verts)):
+                j = (i+1)%len(verts)
+                key = (verts[i], verts[j])
+                lines.append(lmap[key])
+            loop = gmsh.model.geo.add_curve_loop(lines)
+            cell = gmsh.model.geo.add_plane_surface([loop])
+            cells.append((cell, f"s{k+1}"))
         gmsh.model.geo.synchronize()
-        for i, e in enumerate(electrode_lines):
+        for cell, label in cells:
+            gmsh.model.set_physical_name(
+                _2D, gmsh.model.add_physical_group(_2D, [cell]), label)
+        for i, e in enumerate(electrode_lines): 
             gmsh.model.set_physical_name(
                 _1D, gmsh.model.add_physical_group(_1D, [e]), electrodes[i])
-        gmsh.model.add_physical_group(_2D, [domain])
         gmsh.model.geo.synchronize()
- 
+
         # Build the fields
         field_list = list()
         distance_field = gmsh.model.mesh.field.add("Distance")
-        gmsh.model.mesh.field.setNumbers(distance_field, "PointsList", electrode_pt_ids)
+        gmsh.model.mesh.field.setNumbers(distance_field, "CurvesList", electrode_lines)
         field = gmsh.model.mesh.field.add("Threshold")
         gmsh.model.mesh.field.setNumber(field, "InField", distance_field)
-        gmsh.model.mesh.field.setNumber(field, "SizeMin", h1/5)
-        gmsh.model.mesh.field.setNumber(field, "SizeMax", h1)
-        gmsh.model.mesh.field.setNumber(field, "DistMin", .1)
-        gmsh.model.mesh.field.setNumber(field, "DistMax", 2)
+        gmsh.model.mesh.field.setNumber(field, "SizeMin", h2/8)
+        gmsh.model.mesh.field.setNumber(field, "SizeMax", h2)
+        gmsh.model.mesh.field.setNumber(field, "DistMin", 0.1*r0)
+        gmsh.model.mesh.field.setNumber(field, "DistMax", 4*r0)
         field_list.append(field)
 
         # Use the minimum in a list of fields as the background mesh field:
@@ -133,144 +151,153 @@ def build_polygonal_mesh(N, LN, alpha, beta, h1, h2, outdir):
         gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
         gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)
         gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)        
-        
+
+        gmsh.model.geo.synchronize()    
         gmsh.model.mesh.generate(_2D)
         gmsh.write(str(mesh_file))
     finally:
         gmsh.clear()
         gmsh.finalize() 
-    return Path(mesh_file)
+    return mesh_file
 
+def build_circle_mesh(N, LN, alpha, beta, h1, h2, outdir):
+    name = f"N{N:02d}_LN{LN:02d}_A{int(alpha*100):03d}_B{int(beta*100):03d}_H{int(h1*1000):04d}_H{int(h2*1000):04d}"
+    mesh_file = Path(outdir)/f"circ_{name}.msh"    
 
+    r0 = 1/np.sqrt(np.pi)
+    angles = np.linspace(0, 2*np.pi, N, endpoint=False) - np.pi/N - np.pi/2
+    outer_pts = r0*np.array([[np.cos(a), np.sin(a)] for a in angles])
+    electrodes = [f"e{i}" for i in range(LN*N)]
+    gap, ele = np.linalg.solve(
+    [[1+LN, LN],
+        [0,    LN],],
+        [2*np.pi/N, alpha*2*np.pi/N]
+    )
+    vor = _get_voronoi(N, beta, h1)
 
-def _partition(N, pixels, a):
-    angles = np.linspace(0,2*np.pi,N,endpoint=False) - np.pi/N - np.pi/2
-    vor = Voronoi(pixels)
-    unused_verts = list()
-    verts = np.vstack([
-        [[np.cos(a), np.sin(a)] for a in angles],  # outside corners
-        vor.vertices,  # inside voronoi vertices
-    ])
-    boundary_verts = list(range(N))
-    regions = [list(range(N))]  # outside boundary
-    domain_lines = verts[[(i, (i+1)%N) for i in range(N)]]
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Verbosity", 3)
+        a0 = np.arctan2(outer_pts[0,0], outer_pts[0,1])
+        
+        boundaryt_pts = list()
+        for i in range(N):
+            x0, y0 = outer_pts[i,0], outer_pts[i,1]
+            a0 = np.arctan2(y0, x0)
+            boundaryt_pts += [outer_pts[i]]        
+            for _ in range(LN):
+                boundaryt_pts += [[r0*np.cos(a0+gap), r0*np.sin(a0+gap)]]
+                boundaryt_pts += [[r0*np.cos(a0+gap+ele), r0*np.sin(a0+gap+ele)]]
+                a0 += gap + ele
+        boundaryt_pts = np.array(boundaryt_pts)    
+        boundary_pt_ids = [gmsh.model.geo.add_point(*p, 0) for p in boundaryt_pts]
+        center_pt = gmsh.model.geo.add_point(0, 0, 0)
+        
+        # Add boundary lines
+        boundary_lines = list()
+        electrode_lines = list()
+        electrode_pt_ids = list()
+        k = 0
+        for i in range(N*(LN*2+1)):
+            j = (i+1)%len(boundaryt_pts)
+            line = gmsh.model.geo.add_circle_arc(boundary_pt_ids[i], center_pt, boundary_pt_ids[j])
+            boundary_lines += [line]
+            if k % 2 == 1:
+                electrode_pt_ids += [boundary_pt_ids[i], boundary_pt_ids[j]]
+                electrode_lines += [line]
+            k = (k + 1) % (LN*2+1)
+        outer_loop = gmsh.model.geo.add_curve_loop(boundary_lines)
 
-    # adjust ridge_verts map to account for the outside points
-    ridge_verts = np.array([
-        [-1 if rv[0]<0 else rv[0]+N, rv[1]+N]  # don't change the -1's
-        for rv in vor.ridge_vertices
-    ])
-    ridge_points = np.array(vor.ridge_points)
+        # Add inner points
+        pmap = {
+            i:gmsh.model.geo.add_point(*p, 0)
+            for i, p in enumerate(vor.vertices)
+        }
+        
+        # inner facets
+        lmap = dict()
+        for rv in vor.ridge_vertices:
+            if rv[0] >=0:
+                key = (rv[0], rv[1])
+                ikey = (rv[1], rv[0])
+                if key not in lmap and ikey not in lmap:
+                    lmap[key] = gmsh.model.geo.add_line(pmap[rv[0]], pmap[rv[1]])
+                    lmap[ikey] = -lmap[key]
 
-    # fix the -1's in ridge_verts
-    for rp, (i, rv) in zip(ridge_points, enumerate(ridge_verts)):
-        if -1 in rv:
-            p, q = pixels[rp]
-            ridge_dir = np.array([q[1]-p[1], p[0]-q[0]])
-            ridge_dir *= pixels[rp].mean(axis=0) @ ridge_dir
-            ridge_dir *= 1/np.linalg.norm(ridge_dir)
-            ridge_verts[i,0] = verts.shape[0]
-            verts = np.vstack([verts, verts[rv[1]] + ridge_dir])
+        # inner border
+        points = list()    
+        lines = list()
+        x = np.unique(vor.ridge_points[(np.array(vor.ridge_vertices)[:,0] < 0)])
+        for i, rp in enumerate(vor.ridge_points):
+            if (vor.ridge_vertices[i][0] >= 0) and (rp[0] in x or rp[1] in x):
+                points.append(vor.ridge_vertices[i])
+        points = np.unique(points)
+        asort = np.argsort(np.arctan2(vor.vertices[points][:,0], vor.vertices[points][:,1]))
+        points = points[asort]
+        for i in range(len(points)):
+            j = (i+1)%len(points)
+            key = (points[i], points[j])
+            lines.append(lmap[key])
+        inner_loop = gmsh.model.geo.add_curve_loop(lines)
+        # outer_loop = gmsh.model.geo.add_curve_loop(boundary_lines)
+        center = gmsh.model.geo.add_plane_surface([inner_loop])
+        edge =  gmsh.model.geo.add_plane_surface([inner_loop, outer_loop])
+        gmsh.model.set_physical_name(
+            _2D, gmsh.model.add_physical_group(_2D, [edge]), f"s0")
+        
+        # inner elements
+        rv = np.array(vor.ridge_vertices)
+        rp = np.array(vor.ridge_points)
+        p = np.unique(rp[rv[:,0]<0])
+        q = [pp for pp in np.unique(rp) if pp not in p]
 
-    # drop ridges are outside domain
-    unused_ridges = list()
-    for rp, (i, rv) in zip(ridge_points, enumerate(ridge_verts)):
-        if not any([_in_polygon(domain_lines, verts[rv[i]]) for i in [0,1]]):
-            unused_verts += [rv[0], rv[1]]
-            unused_ridges.append(i)
-    ridge_points = np.delete(ridge_points, unused_ridges, axis=0)
-    ridge_verts = np.delete(ridge_verts, unused_ridges, axis=0)        
+        for k, q0 in enumerate(q):
+            lines = list()
+            r = [i for i, r in enumerate(rp) if r[0]==q0 or r[1]==q0]
+            verts = np.unique(rv[r])
+            vert_pts = vor.vertices[verts]
+            asort = np.argsort(np.arctan2(vert_pts[:,0]-vor.points[q0][0], vert_pts[:,1]-vor.points[q0][1]))
+            verts = verts[asort]
+            for i in range(len(verts)):
+                j = (i+1)%len(verts)
+                key = (verts[i], verts[j])
+                lines.append(lmap[key])
+            loop = gmsh.model.geo.add_curve_loop(lines)
+            cell = gmsh.model.geo.add_plane_surface([loop])
+            gmsh.model.set_physical_name(
+                _2D, gmsh.model.add_physical_group(_2D, [cell]), f"s{k+1}")
+            
+        for i, e in enumerate(electrode_lines):
+            gmsh.model.set_physical_name(
+                _1D, gmsh.model.add_physical_group(_1D, [e]), electrodes[i])
+        gmsh.model.geo.synchronize()
 
-    # move outside endpoints to boundary
-    # watch out for collisions with corner points!
-    for rp, (i, rv) in zip(ridge_points, enumerate(ridge_verts)):
-        for line in domain_lines:
-            if _do_intersect(verts[rv], line):
-                new_vert = _intersection_point(verts[rv], line)
-                d = np.linalg.norm(verts-new_vert, axis=1)
-                if d.min() < a:  # collision with existing vert
-                    vert_id = d.argmin()
-                else:
-                    vert_id = verts.shape[0]
-                    verts = np.vstack([verts, new_vert])
-                    boundary_verts.append(vert_id)
-                if _in_polygon(domain_lines, verts[rv[0]]):
-                    unused_verts.append(rv[1])
-                    ridge_verts[i,1] = vert_id
-                else:
-                    unused_verts.append(rv[0])
-                    ridge_verts[i,0] = vert_id
-                break
+        h2 = .05
+        # Build the fields
+        field_list = list()
+        distance_field = gmsh.model.mesh.field.add("Distance")
+        gmsh.model.mesh.field.setNumbers(distance_field, "CurvesList", electrode_lines)
+        field = gmsh.model.mesh.field.add("Threshold")
+        gmsh.model.mesh.field.setNumber(field, "InField", distance_field)
+        gmsh.model.mesh.field.setNumber(field, "SizeMin", h2/8)
+        gmsh.model.mesh.field.setNumber(field, "SizeMax", h2)
+        gmsh.model.mesh.field.setNumber(field, "DistMin", 0.1*r0)
+        gmsh.model.mesh.field.setNumber(field, "DistMax", 4*r0)
+        field_list.append(field)
 
+        # Use the minimum in a list of fields as the background mesh field:
+        mesh_field = gmsh.model.mesh.field.add("Min")
+        gmsh.model.mesh.field.setNumbers(mesh_field, "FieldsList", field_list)
+        gmsh.model.mesh.field.setAsBackgroundMesh(mesh_field)
 
-    # assemble interior region lists
-    for pixel_id in range(pixels.shape[0]):
-        pixel_verts = list()
-        for rp, (i, rv) in zip(ridge_points, enumerate(ridge_verts)):
-            if pixel_id in rp:
-                pixel_verts += [rv[0], rv[1]]
-        corners = list()
-        for j, p in enumerate(verts[:N]):
-            line0 = np.vstack([p, pixels[pixel_id]])        
-            for i in range(len(pixel_verts)//2):
-                line1 = verts[[pixel_verts[i*2], pixel_verts[i*2+1]]]
-                if _do_intersect(line0, line1):
-                    break
-            else:
-                corners.append(j)
-        pixel_verts = np.unique(np.array(pixel_verts+corners))
-        asort = np.argsort([np.arctan2(x, y) for x, y in verts[pixel_verts] - pixels[pixel_id]])
-        regions.append(pixel_verts[asort])
+        gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
+        gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)
+        gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)        
 
-    # discard unused vertices
-    remap = dict()
-    i = 0
-    for r in regions:
-        for p in r:
-            if p not in remap:
-                remap[p] = i
-                i += 1
-    regions = [[remap[p] for p in r] for r in regions]
-    boundary_verts = [remap[p] for p in boundary_verts]
-    verts = np.array([verts[i] for i in remap.keys()])
-    return verts, regions, boundary_verts
-
-
-def _is_left_of(line, pt):
-    return (line[1][0]-line[0][0])*(pt[1]-line[0][1]) - (line[1][1]-line[0][1])*(pt[0]-line[0][0]) > 0
-
-
-def _in_polygon(plines, pt):
-    for line in plines:
-        if not _is_left_of(line, pt):
-            return False
-    return True
-
-
-def _orientation(p0, p1, p2):
-    """Return orientation of three points
-    Returns +1 for clockwise, -1 for counterclockwise, and zero for colinear
-    """
-    return np.sign(((p1[1] - p0[1]) * (p2[0] - p1[0])) - ((p1[0] - p0[0]) * (p2[1] - p1[1])))
-
-
-def _do_intersect(line0, line1):
-    p1,q1 = line0[0], line0[1]
-    p2,q2 = line1[0], line1[1]    
-    o1 = _orientation(p1, q1, p2)
-    o2 = _orientation(p1, q1, q2)
-    o3 = _orientation(p2, q2, p1)
-    o4 = _orientation(p2, q2, q1)
-    return ((o1 != o2) and (o3 != o4))
-
-
-def _intersection_point(line0, line1):
-    return np.linalg.solve(
-        np.array([
-            [line0[0,1]-line0[1,1], line0[1,0]-line0[0,0]],
-            [line1[0,1]-line1[1,1], line1[1,0]-line1[0,0]],
-        ]),
-        -1 * np.array([
-            line0[1,1]*line0[0,0] - line0[1,0]*line0[0,1],
-            line1[1,1]*line1[0,0] - line1[1,0]*line1[0,1],
-        ]))
+        gmsh.model.geo.synchronize()    
+        gmsh.model.mesh.generate(_2D)
+        gmsh.write(str(mesh_file))
+    finally:
+        gmsh.clear()
+        gmsh.finalize() 
+    return mesh_file
